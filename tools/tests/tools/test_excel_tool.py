@@ -1,6 +1,5 @@
 """Tests for Excel tool."""
 
-import os
 import tempfile
 from pathlib import Path
 

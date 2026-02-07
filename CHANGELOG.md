@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Hive Artifacts**: Interactive agent output protocol (#3914)
+  - JSON-based protocol for emitting structured UI components (Forms, Markdown)
+  - Schema layer with Pydantic models for Form and Markdown components
+  - TUI renderer in chat_repl.py for detecting and displaying artifacts
+  - Example agent (`artifact_demo`) demonstrating form and markdown artifacts
+  - Comprehensive unit tests for artifact schema validation
 - Initial project structure
 - React frontend (honeycomb) with Vite and TypeScript
 - Node.js backend (hive) with Express and TypeScript

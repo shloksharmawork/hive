@@ -1,0 +1,14 @@
+{
+    "name": "artifact_demo",
+    "description": "Demonstrates Hive Artifacts with interactive forms and markdown output",
+    "version": "1.0.0",
+    "entry_point": "agent.py",
+    "goal": "artifact_demo",
+    "required_tools": [],
+    "tags": [
+        "demo",
+        "artifacts",
+        "interactive",
+        "ui"
+    ]
+}

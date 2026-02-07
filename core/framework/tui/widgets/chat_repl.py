@@ -4,7 +4,7 @@ Chat / REPL Widget - Uses RichLog for append-only, selection-safe display.
 Streaming display approach:
 - The processing-indicator Label is used as a live status bar during streaming
   (Label.update() replaces text in-place, unlike RichLog which is append-only).
-- On EXECUTION_COMPLETED, the final output is written to RichLog as permanent history.
+- On EXECUTION_COMPLETED, the final output is written to Rich Log as permanent history.
 - Tool events are written directly to RichLog as discrete status lines.
 
 Client-facing input:
@@ -15,6 +15,7 @@ Client-facing input:
 """
 
 import asyncio
+import json
 import re
 import threading
 from typing import Any
@@ -24,6 +25,7 @@ from textual.containers import Vertical
 from textual.widgets import Input, Label
 
 from framework.runtime.agent_runtime import AgentRuntime
+from framework.schemas.artifact import Artifact, ArtifactType, FormFieldType
 from framework.tui.widgets.selectable_rich_log import SelectableRichLog as RichLog
 
 
@@ -76,6 +78,7 @@ class ChatRepl(Vertical):
         self._streaming_snapshot: str = ""
         self._waiting_for_input: bool = False
         self._input_node_id: str | None = None
+        self._active_artifact: Artifact | None = None
 
         # Dedicated event loop for agent execution.
         # Keeps blocking runtime code (LLM calls, MCP tools) off
@@ -263,12 +266,22 @@ class ChatRepl(Vertical):
         indicator = self.query_one("#processing-indicator", Label)
         indicator.display = False
 
-        # Write the final streaming snapshot to permanent history (if any)
-        if self._streaming_snapshot:
-            self._write_history(f"[bold blue]Agent:[/bold blue] {self._streaming_snapshot}")
+        # Check if output contains an artifact (JSON with type="artifact")
+        artifact = self._try_parse_artifact(
+            self._streaming_snapshot or str(output.get("output_string", ""))
+        )
+
+        if artifact:
+            # Render the artifact instead of plain text
+            self._render_artifact(artifact)
         else:
-            output_str = str(output.get("output_string", output))
-            self._write_history(f"[bold blue]Agent:[/bold blue] {output_str}")
+            # Write the final streaming snapshot to permanent history (if any)
+            if self._streaming_snapshot:
+                self._write_history(f"[bold blue]Agent:[/bold blue] {self._streaming_snapshot}")
+            else:
+                output_str = str(output.get("output_string", output))
+                self._write_history(f"[bold blue]Agent:[/bold blue] {output_str}")
+
         self._write_history("")  # separator
 
         self._current_exec_id = None
@@ -323,3 +336,121 @@ class ChatRepl(Vertical):
         chat_input.disabled = False
         chat_input.placeholder = "Type your response..."
         chat_input.focus()
+
+    # -- Artifact handling methods --
+
+    def _try_parse_artifact(self, text: str) -> Artifact | None:
+        """Try to parse artifact JSON from agent output.
+
+        Looks for JSON with type="artifact" in the text.
+        Returns parsed Artifact or None if not found/invalid.
+        """
+        if not text or "artifact" not in text.lower():
+            return None
+
+        try:
+            # Try to find JSON block in the text
+            # Look for patterns like {"type": "artifact", ...}
+            start_idx = text.find('{"type":')
+            if start_idx == -1:
+                start_idx = text.find("{'type':")
+            if start_idx == -1:
+                return None
+
+            # Find the matching closing brace
+            brace_count = 0
+            end_idx = start_idx
+            for i in range(start_idx, len(text)):
+                if text[i] == "{":
+                    brace_count += 1
+                elif text[i] == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i + 1
+                        break
+
+            if end_idx == start_idx:
+                return None
+
+            json_str = text[start_idx:end_idx]
+            data = json.loads(json_str)
+
+            if data.get("type") == "artifact":
+                return Artifact.model_validate(data)
+        except (json.JSONDecodeError, ValueError, Exception):
+            # Not a valid artifact, treat as regular text
+            pass
+
+        return None
+
+    def _render_artifact(self, artifact: Artifact) -> None:
+        """Render an artifact based on its component type."""
+        self._write_history(
+            f"[bold magenta]Agent emitted artifact:[/bold magenta] {artifact.component}"
+        )
+
+        if artifact.component == ArtifactType.FORM:
+            self._render_form_artifact(artifact)
+        elif artifact.component == ArtifactType.MARKDOWN:
+            self._render_markdown_artifact(artifact)
+        else:
+            # Fallback for unsupported types
+            self._write_history(
+                f"[dim]Artifact type '{artifact.component}' not yet supported in TUI[/dim]"
+            )
+            self._write_history(f"[dim]Artifact JSON: {artifact.model_dump_json(indent=2)}[/dim]")
+
+    def _render_markdown_artifact(self, artifact: Artifact) -> None:
+        """Render a markdown artifact."""
+        # For now, write markdown content to history
+        # In a full implementation, could use textual.widgets.Markdown
+        self._write_history("[bold cyan]━━━ Markdown Content ━━━[/bold cyan]")
+        self._write_history(artifact.props.content)
+        self._write_history("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]")
+
+    def _render_form_artifact(self, artifact: Artifact) -> None:
+        """Render a form artifact.
+
+        Shows form fields and prompts user to provide values.
+        For MVP, we use a simplified text-based approach.
+        """
+        self._active_artifact = artifact
+        form = artifact.props
+
+        self._write_history("[bold green]╔════════════════════════════╗[/bold green]")
+        self._write_history(f"[bold green]║ {form.title.center(26)} ║[/bold green]")
+        self._write_history("[bold green]╚════════════════════════════╝[/bold green]")
+
+        if form.description:
+            self._write_history(f"[italic]{form.description}[/italic]\n")
+
+        # Display form fields with instructions
+        self._write_history("[bold]Form Fields:[/bold]")
+        for i, field in enumerate(form.fields, 1):
+            required = "*" if field.required else ""
+
+            if field.type == FormFieldType.SELECT:
+                options_str = ", ".join(field.options)
+                msg = (
+                    f"  {i}. [cyan]{field.label}{required}[/cyan]: "
+                    f"{field.type} (options: {options_str})"
+                )
+                self._write_history(msg)
+            elif field.type == FormFieldType.CHECKBOX:
+                self._write_history(
+                    f"  {i}. [cyan]{field.label}{required}[/cyan]: {field.type} (true/false)"
+                )
+            else:
+                self._write_history(f"  {i}. [cyan]{field.label}{required}[/cyan]: {field.type}")
+
+            if field.help_text:
+                self._write_history(f"     [dim italic]{field.help_text}[/dim italic]")
+            if field.default is not None:
+                self._write_history(f"     [dim]Default: {field.default}[/dim]")
+
+        self._write_history("\n[bold yellow]Please respond in JSON format:[/bold yellow]")
+        self._write_history('[dim]Example: {"env": "staging", "confirm": true}[/dim]\n')
+
+        # Set waiting state for form submission
+        self._waiting_for_input = True
+        self._input_node_id = "artifact_form"  # Special marker for artifact forms
